@@ -240,8 +240,7 @@ int main(int argc, char** argv) {
     double *x_gpu, *y_gpu_dev;
     CHECK_CUDA(cudaMalloc(&x_gpu, matrix.num_cols * sizeof(double)));
     CHECK_CUDA(cudaMalloc(&y_gpu_dev, matrix.num_rows * sizeof(double)));
-    CHECK_CUDA(cudaMemcpy(x_gpu, x, matrix.num_cols * sizeof(double), 
-               cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(x_gpu, x, matrix.num_cols * sizeof(double), cudaMemcpyHostToDevice));
 
     // GPU SpMV
     auto gpu_start = std::chrono::high_resolution_clock::now();
@@ -250,18 +249,43 @@ int main(int argc, char** argv) {
     auto gpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
 
     // Copy result back to host
-    CHECK_CUDA(cudaMemcpy(y_gpu, y_gpu_dev, matrix.num_rows * sizeof(double), 
-               cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(y_gpu, y_gpu_dev, matrix.num_rows * sizeof(double), cudaMemcpyDeviceToHost));
 
     // Verify results
     bool results_match = verify_results(y_cpu, y_gpu, matrix.num_rows);
-    printf("Results %s\n", results_match ? "match" : "do not match");
 
-    // Print timing information and performance metrics
+    // Calculate GFLOPS
     double cpu_gflops = (2.0 * matrix.num_nonzeros) / (cpu_duration.count() * 1000.0);
     double gpu_gflops = (2.0 * matrix.num_nonzeros) / (gpu_duration.count() * 1000.0);
+
+    // Print human-readable output
+    printf("\nPerformance Results:\n");
+    printf("------------------\n");
     printf("CPU time: %ld us (%.2f GFLOPS)\n", cpu_duration.count(), cpu_gflops);
     printf("GPU time: %ld us (%.2f GFLOPS)\n", gpu_duration.count(), gpu_gflops);
+    printf("Validation: Results %s\n\n", results_match ? "match" : "do not match");
+
+    // Output machine-readable JSON format
+    printf("JSON_START\n");  // Marker for parsing
+    printf("{\n");
+    printf("  \"matrix\": {\n");
+    printf("    \"rows\": %d,\n", matrix.num_rows);
+    printf("    \"cols\": %d,\n", matrix.num_cols);
+    printf("    \"nnz\": %d\n", matrix.num_nonzeros);
+    printf("  },\n");
+    printf("  \"cpu\": {\n");
+    printf("    \"time_us\": %ld,\n", cpu_duration.count());
+    printf("    \"gflops\": %.2f\n", cpu_gflops);
+    printf("  },\n");
+    printf("  \"gpu\": {\n");
+    printf("    \"time_us\": %ld,\n", gpu_duration.count());
+    printf("    \"gflops\": %.2f\n", gpu_gflops);
+    printf("  },\n");
+    printf("  \"validation\": {\n");
+    printf("    \"results_match\": %s\n", results_match ? "true" : "false");
+    printf("  }\n");
+    printf("}\n");
+    printf("JSON_END\n");  // Marker for parsing
 
     // Cleanup
     delete[] x;
@@ -269,4 +293,4 @@ int main(int argc, char** argv) {
     delete[] y_gpu;
 
     return 0;
-} 
+}

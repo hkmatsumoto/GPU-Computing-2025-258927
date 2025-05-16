@@ -1,2 +1,3 @@
 *.mtx
 build/
+results/
