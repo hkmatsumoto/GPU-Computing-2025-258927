@@ -73,6 +73,35 @@ void spmv_cpu(const CSRMatrix& A, const double* x, double* y) {
     }
 }
 
+// Function to perform SpMV on CPU with cache optimization (y = Ax)
+void spmv_cpu_optimized(const CSRMatrix& A, const double* x, double* y) {
+    // Simple cache blocking
+    const int BLOCK_SIZE = 16;  // Small block size to ensure data fits in L1 cache
+    
+    // Initialize output vector
+    for (int i = 0; i < A.num_rows; i++) {
+        y[i] = 0.0;
+    }
+    
+    // Process matrix in blocks
+    for (int block_start = 0; block_start < A.num_rows; block_start += BLOCK_SIZE) {
+        const int block_end = std::min(block_start + BLOCK_SIZE, A.num_rows);
+        
+        // Process each row in the block
+        for (int i = block_start; i < block_end; i++) {
+            const int start = A.row_offsets[i];
+            const int end = A.row_offsets[i + 1];
+            
+            // Compute dot product for this row
+            double sum = 0.0;
+            for (int j = start; j < end; j++) {
+                sum += A.values[j] * x[A.col_indices[j]];
+            }
+            y[i] = sum;
+        }
+    }
+}
+
 // CUDA kernel for SpMV
 __global__ void spmv_kernel(int num_rows, const double* values, const int* col_indices, 
                            const int* row_offsets, const double* x, double* y) {
@@ -221,17 +250,24 @@ int main(int argc, char** argv) {
     CSRMatrix matrix = read_mtx_to_csr(argv[1]);
     printf("Matrix loaded: %d rows, %d columns, %d non-zeros\n", 
            matrix.num_rows, matrix.num_cols, matrix.num_nonzeros);
-
+    
     // Generate input vector and allocate output vectors
     double* x = generate_random_vector(matrix.num_cols);
-    double* y_cpu = new double[matrix.num_rows];
+    double* y_cpu_naive = new double[matrix.num_rows];
+    double* y_cpu_opt = new double[matrix.num_rows];
     double* y_gpu = new double[matrix.num_rows];
 
-    // CPU SpMV
-    auto cpu_start = std::chrono::high_resolution_clock::now();
-    spmv_cpu(matrix, x, y_cpu);
-    auto cpu_end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
+    // Naive CPU SpMV
+    auto cpu_naive_start = std::chrono::high_resolution_clock::now();
+    spmv_cpu(matrix, x, y_cpu_naive);
+    auto cpu_naive_end = std::chrono::high_resolution_clock::now();
+    auto cpu_naive_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_naive_end - cpu_naive_start);
+
+    // Optimized CPU SpMV
+    auto cpu_opt_start = std::chrono::high_resolution_clock::now();
+    spmv_cpu_optimized(matrix, x, y_cpu_opt);
+    auto cpu_opt_end = std::chrono::high_resolution_clock::now();
+    auto cpu_opt_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_opt_end - cpu_opt_start);
 
     // Transfer matrix to GPU
     CSRMatrix matrix_gpu = transfer_matrix_to_gpu(matrix);
@@ -252,44 +288,54 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaMemcpy(y_gpu, y_gpu_dev, matrix.num_rows * sizeof(double), cudaMemcpyDeviceToHost));
 
     // Verify results
-    bool results_match = verify_results(y_cpu, y_gpu, matrix.num_rows);
+    bool cpu_results_match = verify_results(y_cpu_naive, y_cpu_opt, matrix.num_rows);
+    bool gpu_results_match = verify_results(y_cpu_naive, y_gpu, matrix.num_rows);
 
     // Calculate GFLOPS
-    double cpu_gflops = (2.0 * matrix.num_nonzeros) / (cpu_duration.count() * 1000.0);
+    double cpu_naive_gflops = (2.0 * matrix.num_nonzeros) / (cpu_naive_duration.count() * 1000.0);
+    double cpu_opt_gflops = (2.0 * matrix.num_nonzeros) / (cpu_opt_duration.count() * 1000.0);
     double gpu_gflops = (2.0 * matrix.num_nonzeros) / (gpu_duration.count() * 1000.0);
 
     // Print human-readable output
     printf("\nPerformance Results:\n");
     printf("------------------\n");
-    printf("CPU time: %ld us (%.2f GFLOPS)\n", cpu_duration.count(), cpu_gflops);
+    printf("CPU (naive) time: %ld us (%.2f GFLOPS)\n", cpu_naive_duration.count(), cpu_naive_gflops);
+    printf("CPU (optimized) time: %ld us (%.2f GFLOPS)\n", cpu_opt_duration.count(), cpu_opt_gflops);
     printf("GPU time: %ld us (%.2f GFLOPS)\n", gpu_duration.count(), gpu_gflops);
-    printf("Validation: Results %s\n\n", results_match ? "match" : "do not match");
+    printf("Validation: CPU implementations %s\n", cpu_results_match ? "match" : "do not match");
+    printf("Validation: GPU results %s with CPU\n\n", gpu_results_match ? "match" : "do not match");
 
     // Output machine-readable JSON format
-    printf("JSON_START\n");  // Marker for parsing
+    printf("JSON_START\n");
     printf("{\n");
     printf("  \"matrix\": {\n");
     printf("    \"rows\": %d,\n", matrix.num_rows);
     printf("    \"cols\": %d,\n", matrix.num_cols);
     printf("    \"nnz\": %d\n", matrix.num_nonzeros);
     printf("  },\n");
-    printf("  \"cpu\": {\n");
-    printf("    \"time_us\": %ld,\n", cpu_duration.count());
-    printf("    \"gflops\": %.2f\n", cpu_gflops);
+    printf("  \"cpu_naive\": {\n");
+    printf("    \"time_us\": %ld,\n", cpu_naive_duration.count());
+    printf("    \"gflops\": %.2f\n", cpu_naive_gflops);
+    printf("  },\n");
+    printf("  \"cpu_optimized\": {\n");
+    printf("    \"time_us\": %ld,\n", cpu_opt_duration.count());
+    printf("    \"gflops\": %.2f\n", cpu_opt_gflops);
     printf("  },\n");
     printf("  \"gpu\": {\n");
     printf("    \"time_us\": %ld,\n", gpu_duration.count());
     printf("    \"gflops\": %.2f\n", gpu_gflops);
     printf("  },\n");
     printf("  \"validation\": {\n");
-    printf("    \"results_match\": %s\n", results_match ? "true" : "false");
+    printf("    \"cpu_implementations_match\": %s,\n", cpu_results_match ? "true" : "false");
+    printf("    \"gpu_results_match\": %s\n", gpu_results_match ? "true" : "false");
     printf("  }\n");
     printf("}\n");
-    printf("JSON_END\n");  // Marker for parsing
+    printf("JSON_END\n");
 
     // Cleanup
     delete[] x;
-    delete[] y_cpu;
+    delete[] y_cpu_naive;
+    delete[] y_cpu_opt;
     delete[] y_gpu;
 
     return 0;

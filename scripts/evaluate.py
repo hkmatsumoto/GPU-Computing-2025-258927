@@ -64,17 +64,21 @@ def parse_output(output):
             'rows': data['matrix']['rows'],
             'cols': data['matrix']['cols'],
             'nnz': data['matrix']['nnz'],
-            'cpu_time': data['cpu']['time_us'],
-            'cpu_gflops': data['cpu']['gflops'],
+            'cpu_naive_time': data['cpu_naive']['time_us'],
+            'cpu_naive_gflops': data['cpu_naive']['gflops'],
+            'cpu_opt_time': data['cpu_optimized']['time_us'],
+            'cpu_opt_gflops': data['cpu_optimized']['gflops'],
             'gpu_time': data['gpu']['time_us'],
             'gpu_gflops': data['gpu']['gflops'],
-            'results_match': data['validation']['results_match']
+            'cpu_implementations_match': data['validation']['cpu_implementations_match'],
+            'gpu_results_match': data['validation']['gpu_results_match']
         }
         
         # Calculate memory throughput (GB/s)
         # For CSR format: values (8 bytes) + col_indices (4 bytes) + row_offsets (4 bytes)
         bytes_accessed = metrics['nnz'] * (8 + 4) + (metrics['rows'] + 1) * 4
-        metrics['cpu_bandwidth'] = bytes_accessed / (metrics['cpu_time'] * 1e-6) / 1e9
+        metrics['cpu_naive_bandwidth'] = bytes_accessed / (metrics['cpu_naive_time'] * 1e-6) / 1e9
+        metrics['cpu_opt_bandwidth'] = bytes_accessed / (metrics['cpu_opt_time'] * 1e-6) / 1e9
         metrics['gpu_bandwidth'] = bytes_accessed / (metrics['gpu_time'] * 1e-6) / 1e9
         
         return metrics
@@ -109,11 +113,12 @@ def plot_results(results_df, plots_dir):
     
     # Plot execution time
     plt.figure()
-    plt.plot(results_df['nnz'], results_df['cpu_time'], 'o-', label='CPU')
+    plt.plot(results_df['nnz'], results_df['cpu_naive_time'], 'o-', label='CPU (Naive)')
+    plt.plot(results_df['nnz'], results_df['cpu_opt_time'], 'o-', label='CPU (Optimized)')
     plt.plot(results_df['nnz'], results_df['gpu_time'], 'o-', label='GPU')
     plt.xlabel('Number of Non-zeros')
     plt.ylabel('Execution Time (μs)')
-    plt.title('SpMV Performance: CPU vs GPU')
+    plt.title('SpMV Performance: Execution Time Comparison')
     plt.legend()
     plt.xscale('log')
     plt.yscale('log')
@@ -122,11 +127,12 @@ def plot_results(results_df, plots_dir):
     
     # Plot GFLOPS
     plt.figure()
-    plt.plot(results_df['nnz'], results_df['cpu_gflops'], 'o-', label='CPU')
+    plt.plot(results_df['nnz'], results_df['cpu_naive_gflops'], 'o-', label='CPU (Naive)')
+    plt.plot(results_df['nnz'], results_df['cpu_opt_gflops'], 'o-', label='CPU (Optimized)')
     plt.plot(results_df['nnz'], results_df['gpu_gflops'], 'o-', label='GPU')
     plt.xlabel('Number of Non-zeros')
     plt.ylabel('GFLOPS')
-    plt.title('SpMV Performance: GFLOPS')
+    plt.title('SpMV Performance: GFLOPS Comparison')
     plt.legend()
     plt.xscale('log')
     plt.savefig(plots_dir / 'gflops.png')
@@ -134,11 +140,12 @@ def plot_results(results_df, plots_dir):
     
     # Plot Memory Bandwidth
     plt.figure()
-    plt.plot(results_df['nnz'], results_df['cpu_bandwidth'], 'o-', label='CPU')
+    plt.plot(results_df['nnz'], results_df['cpu_naive_bandwidth'], 'o-', label='CPU (Naive)')
+    plt.plot(results_df['nnz'], results_df['cpu_opt_bandwidth'], 'o-', label='CPU (Optimized)')
     plt.plot(results_df['nnz'], results_df['gpu_bandwidth'], 'o-', label='GPU')
     plt.xlabel('Number of Non-zeros')
     plt.ylabel('Memory Bandwidth (GB/s)')
-    plt.title('SpMV Performance: Memory Bandwidth')
+    plt.title('SpMV Performance: Memory Bandwidth Comparison')
     plt.legend()
     plt.xscale('log')
     plt.savefig(plots_dir / 'memory_bandwidth.png')
@@ -164,8 +171,10 @@ def main():
             # Add matrix name to metrics
             metrics['matrix_name'] = Path(matrix).name
             results.append(metrics)
-            if not metrics['results_match']:
-                print(f"Warning: Results do not match for {matrix}")
+            if not metrics['gpu_results_match']:
+                print(f"Warning: GPU results do not match CPU for {matrix}")
+            if not metrics['cpu_implementations_match']:
+                print(f"Warning: CPU implementations do not match for {matrix}")
     
     if not results:
         print("No results collected. Exiting.")
