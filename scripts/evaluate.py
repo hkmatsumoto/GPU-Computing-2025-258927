@@ -68,10 +68,13 @@ def parse_output(output):
             'cpu_naive_gflops': data['cpu_naive']['gflops'],
             'cpu_opt_time': data['cpu_optimized']['time_us'],
             'cpu_opt_gflops': data['cpu_optimized']['gflops'],
-            'gpu_time': data['gpu']['time_us'],
-            'gpu_gflops': data['gpu']['gflops'],
+            'gpu_naive_time': data['gpu_naive']['time_us'],
+            'gpu_naive_gflops': data['gpu_naive']['gflops'],
+            'gpu_opt_time': data['gpu_optimized']['time_us'],
+            'gpu_opt_gflops': data['gpu_optimized']['gflops'],
             'cpu_implementations_match': data['validation']['cpu_implementations_match'],
-            'gpu_results_match': data['validation']['gpu_results_match']
+            'gpu_naive_results_match': data['validation']['gpu_naive_results_match'],
+            'gpu_opt_results_match': data['validation']['gpu_optimized_results_match']
         }
         
         # Calculate memory throughput (GB/s)
@@ -79,7 +82,8 @@ def parse_output(output):
         bytes_accessed = metrics['nnz'] * (8 + 4) + (metrics['rows'] + 1) * 4
         metrics['cpu_naive_bandwidth'] = bytes_accessed / (metrics['cpu_naive_time'] * 1e-6) / 1e9
         metrics['cpu_opt_bandwidth'] = bytes_accessed / (metrics['cpu_opt_time'] * 1e-6) / 1e9
-        metrics['gpu_bandwidth'] = bytes_accessed / (metrics['gpu_time'] * 1e-6) / 1e9
+        metrics['gpu_naive_bandwidth'] = bytes_accessed / (metrics['gpu_naive_time'] * 1e-6) / 1e9
+        metrics['gpu_opt_bandwidth'] = bytes_accessed / (metrics['gpu_opt_time'] * 1e-6) / 1e9
         
         return metrics
     except json.JSONDecodeError as e:
@@ -103,6 +107,54 @@ def run_valgrind_analysis(matrix_path, profiling_dir):
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.stdout
 
+def plot_improvement_ratios(results_df, plots_dir):
+    """
+    Generate bar plot showing improvement ratios for each matrix and implementation
+    """
+    plt.figure(figsize=(12, 6))
+    
+    # Calculate improvement ratios (relative to naive CPU implementation)
+    results_df['cpu_opt_speedup'] = results_df['cpu_naive_time'] / results_df['cpu_opt_time']
+    results_df['gpu_naive_speedup'] = results_df['cpu_naive_time'] / results_df['gpu_naive_time']
+    results_df['gpu_opt_speedup'] = results_df['cpu_naive_time'] / results_df['gpu_opt_time']
+    
+    # Prepare data for plotting
+    matrices = results_df['matrix_name']
+    cpu_opt_speedups = results_df['cpu_opt_speedup']
+    gpu_naive_speedups = results_df['gpu_naive_speedup']
+    gpu_opt_speedups = results_df['gpu_opt_speedup']
+    
+    # Set up bar positions
+    x = np.arange(len(matrices))
+    width = 0.25  # Narrower bars to fit three bars
+    
+    # Create bars
+    plt.bar(x - width, cpu_opt_speedups, width, label='CPU Optimized')
+    plt.bar(x, gpu_naive_speedups, width, label='GPU Naive')
+    plt.bar(x + width, gpu_opt_speedups, width, label='GPU Optimized')
+    
+    # Customize plot
+    plt.xlabel('Matrix')
+    plt.ylabel('Speedup (relative to naive CPU)')
+    plt.title('Performance Improvement Ratios by Implementation')
+    plt.xticks(x, matrices, rotation=45, ha='right')
+    plt.legend()
+    
+    # Add value labels on top of bars
+    for i, v in enumerate(cpu_opt_speedups):
+        plt.text(i - width, v, f'{v:.2f}x', ha='center', va='bottom')
+    for i, v in enumerate(gpu_naive_speedups):
+        plt.text(i, v, f'{v:.2f}x', ha='center', va='bottom')
+    for i, v in enumerate(gpu_opt_speedups):
+        plt.text(i + width, v, f'{v:.2f}x', ha='center', va='bottom')
+    
+    # Adjust layout to prevent label cutoff
+    plt.tight_layout()
+    
+    # Save plot
+    plt.savefig(plots_dir / 'improvement_ratios.png')
+    plt.close()
+
 def plot_results(results_df, plots_dir):
     """
     Generate performance plots
@@ -115,7 +167,8 @@ def plot_results(results_df, plots_dir):
     plt.figure()
     plt.plot(results_df['nnz'], results_df['cpu_naive_time'], 'o-', label='CPU (Naive)')
     plt.plot(results_df['nnz'], results_df['cpu_opt_time'], 'o-', label='CPU (Optimized)')
-    plt.plot(results_df['nnz'], results_df['gpu_time'], 'o-', label='GPU')
+    plt.plot(results_df['nnz'], results_df['gpu_naive_time'], 'o-', label='GPU (Naive)')
+    plt.plot(results_df['nnz'], results_df['gpu_opt_time'], 'o-', label='GPU (Optimized)')
     plt.xlabel('Number of Non-zeros')
     plt.ylabel('Execution Time (μs)')
     plt.title('SpMV Performance: Execution Time Comparison')
@@ -129,7 +182,8 @@ def plot_results(results_df, plots_dir):
     plt.figure()
     plt.plot(results_df['nnz'], results_df['cpu_naive_gflops'], 'o-', label='CPU (Naive)')
     plt.plot(results_df['nnz'], results_df['cpu_opt_gflops'], 'o-', label='CPU (Optimized)')
-    plt.plot(results_df['nnz'], results_df['gpu_gflops'], 'o-', label='GPU')
+    plt.plot(results_df['nnz'], results_df['gpu_naive_gflops'], 'o-', label='GPU (Naive)')
+    plt.plot(results_df['nnz'], results_df['gpu_opt_gflops'], 'o-', label='GPU (Optimized)')
     plt.xlabel('Number of Non-zeros')
     plt.ylabel('GFLOPS')
     plt.title('SpMV Performance: GFLOPS Comparison')
@@ -142,7 +196,8 @@ def plot_results(results_df, plots_dir):
     plt.figure()
     plt.plot(results_df['nnz'], results_df['cpu_naive_bandwidth'], 'o-', label='CPU (Naive)')
     plt.plot(results_df['nnz'], results_df['cpu_opt_bandwidth'], 'o-', label='CPU (Optimized)')
-    plt.plot(results_df['nnz'], results_df['gpu_bandwidth'], 'o-', label='GPU')
+    plt.plot(results_df['nnz'], results_df['gpu_naive_bandwidth'], 'o-', label='GPU (Naive)')
+    plt.plot(results_df['nnz'], results_df['gpu_opt_bandwidth'], 'o-', label='GPU (Optimized)')
     plt.xlabel('Number of Non-zeros')
     plt.ylabel('Memory Bandwidth (GB/s)')
     plt.title('SpMV Performance: Memory Bandwidth Comparison')
@@ -150,6 +205,9 @@ def plot_results(results_df, plots_dir):
     plt.xscale('log')
     plt.savefig(plots_dir / 'memory_bandwidth.png')
     plt.close()
+    
+    # Plot improvement ratios
+    plot_improvement_ratios(results_df, plots_dir)
 
 def main():
     # Setup results directory
@@ -171,7 +229,7 @@ def main():
             # Add matrix name to metrics
             metrics['matrix_name'] = Path(matrix).name
             results.append(metrics)
-            if not metrics['gpu_results_match']:
+            if not metrics['gpu_naive_results_match'] or not metrics['gpu_opt_results_match']:
                 print(f"Warning: GPU results do not match CPU for {matrix}")
             if not metrics['cpu_implementations_match']:
                 print(f"Warning: CPU implementations do not match for {matrix}")

@@ -116,16 +116,58 @@ __global__ void spmv_kernel(int num_rows, const double* values, const int* col_i
     }
 }
 
-// Function to perform SpMV on GPU
-void spmv_gpu(const CSRMatrix& A, const double* x_gpu, double* y_gpu) {
-    const int BLOCK_SIZE = 256;
-    int num_blocks = (A.num_rows + BLOCK_SIZE - 1) / BLOCK_SIZE;
+// Function to perform SpMV on GPU with different block sizes
+void spmv_gpu_block_optimized(const CSRMatrix& A, const double* x_gpu, double* y_gpu, int block_size) {
+    int num_blocks = (A.num_rows + block_size - 1) / block_size;
     
-    spmv_kernel<<<num_blocks, BLOCK_SIZE>>>(A.num_rows, A.values, 
+    spmv_kernel<<<num_blocks, block_size>>>(A.num_rows, A.values, 
         A.col_indices, A.row_offsets, x_gpu, y_gpu);
     
     CHECK_CUDA(cudaGetLastError());
     CHECK_CUDA(cudaDeviceSynchronize());
+}
+
+// Function to test different block sizes
+int benchmark_block_sizes(const CSRMatrix& A, const double* x_gpu, double* y_gpu_dev, double* y_gpu) {
+    const int block_sizes[] = {128, 256, 512, 1024};
+    const int num_block_sizes = sizeof(block_sizes) / sizeof(block_sizes[0]);
+    
+    printf("\nBlock Size Benchmark Results:\n");
+    printf("-------------------------\n");
+    printf("Block Size | Time (us) | GFLOPS\n");
+    printf("-------------------------\n");
+    
+    double best_time = 1e9;
+    int best_block_size = 256;  // Default block size
+    
+    for (int i = 0; i < num_block_sizes; i++) {
+        int block_size = block_sizes[i];
+        
+        // Run SpMV with current block size
+        auto start = std::chrono::high_resolution_clock::now();
+        spmv_gpu_block_optimized(A, x_gpu, y_gpu_dev, block_size);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        
+        double time = duration.count();
+        double gflops = (2.0 * A.num_nonzeros) / (time * 1000.0);
+        
+        printf("%9d | %9.2f | %6.2f\n", block_size, time, gflops);
+        
+        if (time < best_time) {
+            best_time = time;
+            best_block_size = block_size;
+        }
+    }
+    
+    printf("\nBest block size: %d (%.2f us, %.2f GFLOPS)\n", 
+           best_block_size, best_time, (2.0 * A.num_nonzeros) / (best_time * 1000.0));
+    
+    // Run one final time with the best block size and copy results back
+    spmv_gpu_block_optimized(A, x_gpu, y_gpu_dev, best_block_size);
+    CHECK_CUDA(cudaMemcpy(y_gpu, y_gpu_dev, A.num_rows * sizeof(double), cudaMemcpyDeviceToHost));
+    
+    return best_block_size;
 }
 
 // Function to transfer matrix to GPU
@@ -278,32 +320,46 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaMalloc(&y_gpu_dev, matrix.num_rows * sizeof(double)));
     CHECK_CUDA(cudaMemcpy(x_gpu, x, matrix.num_cols * sizeof(double), cudaMemcpyHostToDevice));
 
-    // GPU SpMV
-    auto gpu_start = std::chrono::high_resolution_clock::now();
-    spmv_gpu(matrix_gpu, x_gpu, y_gpu_dev);
-    auto gpu_end = std::chrono::high_resolution_clock::now();
-    auto gpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
+    // Run block size benchmark
+    printf("\nRunning block size benchmark...\n");
+    int best_block_size = benchmark_block_sizes(matrix_gpu, x_gpu, y_gpu_dev, y_gpu);
 
-    // Copy result back to host
+    // GPU SpMV with default block size (naive implementation)
+    auto gpu_naive_start = std::chrono::high_resolution_clock::now();
+    spmv_gpu_block_optimized(matrix_gpu, x_gpu, y_gpu_dev, 256);  // Default block size = 256
+    auto gpu_naive_end = std::chrono::high_resolution_clock::now();
+    auto gpu_naive_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_naive_end - gpu_naive_start);
+    
+    // Copy naive GPU result back to host
     CHECK_CUDA(cudaMemcpy(y_gpu, y_gpu_dev, matrix.num_rows * sizeof(double), cudaMemcpyDeviceToHost));
+    bool gpu_naive_results_match = verify_results(y_cpu_naive, y_gpu, matrix.num_rows);
 
-    // Verify results
-    bool cpu_results_match = verify_results(y_cpu_naive, y_cpu_opt, matrix.num_rows);
-    bool gpu_results_match = verify_results(y_cpu_naive, y_gpu, matrix.num_rows);
+    // GPU SpMV with optimized block size
+    auto gpu_opt_start = std::chrono::high_resolution_clock::now();
+    spmv_gpu_block_optimized(matrix_gpu, x_gpu, y_gpu_dev, best_block_size);
+    auto gpu_opt_end = std::chrono::high_resolution_clock::now();
+    auto gpu_opt_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_opt_end - gpu_opt_start);
+
+    // Copy optimized GPU result back to host
+    CHECK_CUDA(cudaMemcpy(y_gpu, y_gpu_dev, matrix.num_rows * sizeof(double), cudaMemcpyDeviceToHost));
+    bool gpu_opt_results_match = verify_results(y_cpu_naive, y_gpu, matrix.num_rows);
 
     // Calculate GFLOPS
     double cpu_naive_gflops = (2.0 * matrix.num_nonzeros) / (cpu_naive_duration.count() * 1000.0);
     double cpu_opt_gflops = (2.0 * matrix.num_nonzeros) / (cpu_opt_duration.count() * 1000.0);
-    double gpu_gflops = (2.0 * matrix.num_nonzeros) / (gpu_duration.count() * 1000.0);
+    double gpu_naive_gflops = (2.0 * matrix.num_nonzeros) / (gpu_naive_duration.count() * 1000.0);
+    double gpu_opt_gflops = (2.0 * matrix.num_nonzeros) / (gpu_opt_duration.count() * 1000.0);
 
     // Print human-readable output
     printf("\nPerformance Results:\n");
     printf("------------------\n");
     printf("CPU (naive) time: %ld us (%.2f GFLOPS)\n", cpu_naive_duration.count(), cpu_naive_gflops);
     printf("CPU (optimized) time: %ld us (%.2f GFLOPS)\n", cpu_opt_duration.count(), cpu_opt_gflops);
-    printf("GPU time: %ld us (%.2f GFLOPS)\n", gpu_duration.count(), gpu_gflops);
-    printf("Validation: CPU implementations %s\n", cpu_results_match ? "match" : "do not match");
-    printf("Validation: GPU results %s with CPU\n\n", gpu_results_match ? "match" : "do not match");
+    printf("GPU (naive - block size 256) time: %ld us (%.2f GFLOPS)\n", gpu_naive_duration.count(), gpu_naive_gflops);
+    printf("GPU (optimized - block size %d) time: %ld us (%.2f GFLOPS)\n", best_block_size, gpu_opt_duration.count(), gpu_opt_gflops);
+    printf("Validation: CPU implementations %s\n", verify_results(y_cpu_naive, y_cpu_opt, matrix.num_rows) ? "match" : "do not match");
+    printf("Validation: GPU naive results %s with CPU\n", gpu_naive_results_match ? "match" : "do not match");
+    printf("Validation: GPU optimized results %s with CPU\n", gpu_opt_results_match ? "match" : "do not match");
 
     // Output machine-readable JSON format
     printf("JSON_START\n");
@@ -321,13 +377,20 @@ int main(int argc, char** argv) {
     printf("    \"time_us\": %ld,\n", cpu_opt_duration.count());
     printf("    \"gflops\": %.2f\n", cpu_opt_gflops);
     printf("  },\n");
-    printf("  \"gpu\": {\n");
-    printf("    \"time_us\": %ld,\n", gpu_duration.count());
-    printf("    \"gflops\": %.2f\n", gpu_gflops);
+    printf("  \"gpu_naive\": {\n");
+    printf("    \"block_size\": 256,\n");
+    printf("    \"time_us\": %ld,\n", gpu_naive_duration.count());
+    printf("    \"gflops\": %.2f\n", gpu_naive_gflops);
+    printf("  },\n");
+    printf("  \"gpu_optimized\": {\n");
+    printf("    \"block_size\": %d,\n", best_block_size);
+    printf("    \"time_us\": %ld,\n", gpu_opt_duration.count());
+    printf("    \"gflops\": %.2f\n", gpu_opt_gflops);
     printf("  },\n");
     printf("  \"validation\": {\n");
-    printf("    \"cpu_implementations_match\": %s,\n", cpu_results_match ? "true" : "false");
-    printf("    \"gpu_results_match\": %s\n", gpu_results_match ? "true" : "false");
+    printf("    \"cpu_implementations_match\": %s,\n", verify_results(y_cpu_naive, y_cpu_opt, matrix.num_rows) ? "true" : "false");
+    printf("    \"gpu_naive_results_match\": %s,\n", gpu_naive_results_match ? "true" : "false");
+    printf("    \"gpu_optimized_results_match\": %s\n", gpu_opt_results_match ? "true" : "false");
     printf("  }\n");
     printf("}\n");
     printf("JSON_END\n");
